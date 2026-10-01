@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import List
 
 from loguru import logger
@@ -18,6 +18,21 @@ from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
 from app.utils import utils
 
 _max_retries = 5
+
+_TRANSIENT_ERROR_MARKERS = (
+    "503",
+    "UNAVAILABLE",
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "rate limit",
+    "overloaded",
+)
+
+
+def _is_transient_provider_error(message: str) -> bool:
+    """Whether a provider error text looks like a temporary overload or rate limit."""
+    lowered = message.lower()
+    return any(marker.lower() in lowered for marker in _TRANSIENT_ERROR_MARKERS)
 MIN_SCRIPT_PARAGRAPH_NUMBER = 1
 MAX_SCRIPT_PARAGRAPH_NUMBER = 10
 MAX_SCRIPT_PROMPT_LENGTH = 2000
@@ -931,6 +946,16 @@ Please note that you must use English for generating video search terms; Chinese
                 # 错误文案原样返回，下游只做空值判断时会把非空字符串误认为成功，
                 # 素材下载循环还会按字符遍历错误文案，产生无意义的外部请求。
                 # 这里统一返回空列表，让任务编排层在真实故障位置立即结束任务。
+                if i < _max_retries - 1 and _is_transient_provider_error(response):
+                    # Overload/rate-limit errors are usually short-lived; back off
+                    # and retry instead of failing the whole task.
+                    delay = min(2 ** (i + 1), 30)
+                    logger.warning(
+                        f"transient error generating video terms, retrying in "
+                        f"{delay}s... {i + 1}: {response[:200]}"
+                    )
+                    sleep(delay)
+                    continue
                 logger.error(f"failed to generate video terms: {response}")
                 return []
             search_terms = json.loads(_strip_code_fence(response))
