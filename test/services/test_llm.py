@@ -267,6 +267,25 @@ class TestScriptPromptOptions(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertIsInstance(result, list)
 
+    def test_generate_terms_retries_transient_provider_error(self):
+        """A temporary overload (503) must be retried instead of failing the task."""
+        with patch.object(
+            llm,
+            "_generate_response",
+            side_effect=[
+                "Error: 503 UNAVAILABLE. This model is currently experiencing high demand.",
+                '["robot city", "smart home"]',
+            ],
+        ) as generate, patch.object(llm, "sleep") as sleep:
+            result = llm.generate_terms(
+                video_subject="AI everyday life",
+                video_script="AI is everywhere.",
+            )
+
+        self.assertEqual(result, ["robot city", "smart home"])
+        self.assertEqual(generate.call_count, 2)
+        sleep.assert_called_once()
+
     def test_generate_terms_retries_non_string_items_in_recovered_json(self):
         """The prose-wrapped JSON recovery path must enforce List[str] too."""
         with patch.object(
